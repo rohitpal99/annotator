@@ -8,9 +8,8 @@ var editor = require('./editor');
 var highlighter = require('./highlighter');
 var textselector = require('./textselector');
 var viewer = require('./viewer');
-
+var Range = require('xpath-range').Range;
 var _t = util.gettext;
-
 
 // trim strips whitespace from either end of a string.
 //
@@ -213,6 +212,7 @@ function main(options) {
     options.element = options.element || global.document.body;
     options.editorExtensions = options.editorExtensions || [];
     options.viewerExtensions = options.viewerExtensions || [];
+    options.parentAnnotationListenerSelector = options.parentAnnotationListenerSelector || null
 
     // Local helpers
     var makeAnnotation = annotationFactory(options.element, '.annotator-hl');
@@ -222,9 +222,25 @@ function main(options) {
         interactionPoint: null
     };
 
+    function triggerParentAnnotationEvent (eventName, object, parentElementSelector) {
+      if (parentElementSelector) {
+        var customEvent = new CustomEvent(eventName, { detail: object })
+        var parentDomElement = window.parent.document.querySelector(parentElementSelector)
+        if (parentDomElement) {
+          parentDomElement.dispatchEvent(customEvent)
+        } else {
+          console.error("parent listener element was not found");
+        }
+      } else {
+        console.warn("Parent dom element was not passed in options, use options.parentAnnotationListenerSelector");
+      }
+    }
+
+
     function start(app) {
         var ident = app.registry.getUtility('identityPolicy');
         var authz = app.registry.getUtility('authorizationPolicy');
+        var searchedResultAnnotations = []
 
         s.adder = new adder.Adder({
             onCreate: function (ann) {
@@ -241,6 +257,29 @@ function main(options) {
         addPermissionsCheckboxes(s.editor, ident, authz);
 
         s.highlighter = new highlighter.Highlighter(options.element);
+
+        s.searchResultHiglighter = new highlighter.Highlighter(options.element, {
+          highlightClass: "annotator-searched"
+        });
+
+        options.element.addEventListener('searchedResultsLoaded', function (e) {
+          var eventSearchAnnotations = e.detail.searchedResultAnnotations
+          if (eventSearchAnnotations) {
+            for (var i = 0; i < searchedResultAnnotations.length; i++) {
+              s.searchResultHiglighter.undraw(searchedResultAnnotations[i]);
+            }
+            searchedResultAnnotations = [].concat(eventSearchAnnotations)
+            s.searchResultHiglighter.drawAll(searchedResultAnnotations);
+          } else {
+            console.log("no searched results annotations to load.")
+          }
+        });
+
+        options.element.addEventListener('searchedResultsRemoved', function (e) {
+          for (var i = 0; i < searchedResultAnnotations.length; i++) {
+            s.searchResultHiglighter.undraw(searchedResultAnnotations[i]);
+          }
+        });
 
         s.textselector = new textselector.TextSelector(options.element, {
             onSelection: function (ranges, event) {
@@ -286,16 +325,31 @@ function main(options) {
             s.adder.destroy();
             s.editor.destroy();
             s.highlighter.destroy();
+            s.searchResultHiglighter.destroy();
             s.textselector.destroy();
             s.viewer.destroy();
             removeDynamicStyle();
         },
 
-        annotationsLoaded: function (anns) { s.highlighter.drawAll(anns); },
-        annotationCreated: function (ann) { s.highlighter.draw(ann); },
-        annotationDeleted: function (ann) { s.highlighter.undraw(ann); },
-        annotationUpdated: function (ann) { s.highlighter.redraw(ann); },
-
+        annotationsLoaded: function(anns) {
+          triggerParentAnnotationEvent("annotationsLoaded", { annotations: anns }, options.parentAnnotationListenerSelector)
+          s.highlighter.drawAll(anns);
+        },
+        annotationCreated: function(ann) {
+          triggerParentAnnotationEvent("annotationCreated", { annotation: ann }, options.parentAnnotationListenerSelector)
+          s.highlighter.draw(ann);
+        },
+        annotationDeleted: function(ann) {
+          triggerParentAnnotationEvent("annotationDeleted",
+            { annotationId: $(ann._local.highlights).data("annotationId") },
+            options.parentAnnotationListenerSelector
+          )
+          s.highlighter.undraw(ann);
+        },
+        annotationUpdated: function(ann) {
+          triggerParentAnnotationEvent("annotationUpdated", { annotation: ann }, options.parentAnnotationListenerSelector)
+          s.highlighter.redraw(ann);
+        },
         beforeAnnotationCreated: function (annotation) {
             // Editor#load returns a promise that is resolved if editing
             // completes, and rejected if editing is cancelled. We return it
